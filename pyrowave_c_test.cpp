@@ -332,7 +332,7 @@ static void test_error_correction_api()
 	pyrowave_device_destroy(device);
 }
 
-static void test_basic_encoder_roundtrip(bool fragment_decode, bool nv12_encode, pyrowave_chroma_subsampling chroma)
+static void test_basic_encoder_roundtrip(bool fragment_decode, bool nv12_encode, pyrowave_chroma_subsampling chroma, bool hdr)
 {
 	if (chroma == PYROWAVE_CHROMA_SUBSAMPLING_444 && nv12_encode)
 		return;
@@ -425,6 +425,10 @@ static void test_basic_encoder_roundtrip(bool fragment_decode, bool nv12_encode,
 	cpu_buffer.width = Width;
 	cpu_buffer.height = Height;
 	const pyrowave_rate_control rate_control = { 64 * 1024 }; // Just give it something massive.
+	pyrowave_color_metadata color = { uint32_t(hdr), uint32_t(hdr), uint32_t(hdr), 0, 0 };
+	CHECKED(pyrowave_encoder_set_color_metadata(encoder, &color));
+	color.transfer_function = 2;
+	ASSERT_THAT(pyrowave_encoder_set_color_metadata(encoder, &color) == PYROWAVE_ERROR_INVALID_ARGUMENT);
 	CHECKED(pyrowave_encoder_encode_cpu_synchronous(encoder, &cpu_buffer, &rate_control));
 
 	size_t num_packets;
@@ -443,6 +447,11 @@ static void test_basic_encoder_roundtrip(bool fragment_decode, bool nv12_encode,
 	ASSERT_THAT(packet.size != 0);
 	ASSERT_THAT(packet.size <= bitstream.size());
 	bitstream.resize(packet.size);
+	uint32_t metadata;
+	std::memcpy(&metadata, bitstream.data() + 4, 4);
+	ASSERT_THAT(((metadata >> 27) & 7) == (hdr ? 7u : 0u));
+	ASSERT_THAT(bool(metadata & (1u << 26)) == (chroma == PYROWAVE_CHROMA_SUBSAMPLING_444));
+	ASSERT_THAT(pyrowave_encoder_packetize(encoder, &packet, 64 * 1024, &num_packets, bitstream.data(), 4) == PYROWAVE_ERROR_INVALID_ARGUMENT);
 
 	// Just padding on its own should not change the bitstream in any way if the splits don't happen.
 	CHECKED(pyrowave_encoder_packetize_with_padding(encoder, &packet, 64 * 1024, 16, &num_packets,
@@ -702,12 +711,12 @@ int main()
 	test_basic_system_stability(true);
 
 	// Correctness tests for small-ish outputs.
-	for (int variant = 0; variant < 8; variant++)
+	for (int variant = 0; variant < 16; variant++)
 	{
 		printf("Running roundtrip variant %d test ...\n", variant);
 		test_basic_encoder_roundtrip(
 			(variant & 1) != 0, (variant & 2) != 0,
-			(variant & 4) != 0 ? PYROWAVE_CHROMA_SUBSAMPLING_444 : PYROWAVE_CHROMA_SUBSAMPLING_420);
+			(variant & 4) != 0 ? PYROWAVE_CHROMA_SUBSAMPLING_444 : PYROWAVE_CHROMA_SUBSAMPLING_420, (variant & 8) != 0);
 	}
 
 	test_error_correction_api();

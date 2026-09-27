@@ -693,7 +693,7 @@ static void test_direct_interop()
 	pyrowave_device_destroy(pyro_device);
 }
 
-static void test_direct_interop_scaling()
+static void test_direct_interop_scaling(bool hdr)
 {
 	ASSERT_THAT(Context::init_loader(nullptr));
 
@@ -786,13 +786,13 @@ static void test_direct_interop_scaling()
 			int g = 128;
 			int b = 128;
 #endif
-			plane_data[y][x] = r | (g << 8) | (b << 16);
+			plane_data[y][x] = hdr ? uint32_t(r * 4) | (uint32_t(g * 4) << 10) | (uint32_t(b * 4) << 20) | (3u << 30) : r | (g << 8) | (b << 16);
 		}
 	}
 
-	auto image_info = ImageCreateInfo::immutable_2d_image(67, 66, VK_FORMAT_R8G8B8A8_SRGB);
+	auto image_info = ImageCreateInfo::immutable_2d_image(67, 66, hdr ? VK_FORMAT_A2B10G10R10_UNORM_PACK32 : VK_FORMAT_R8G8B8A8_SRGB);
 	image_info.initial_layout = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
-	image_info.misc = IMAGE_MISC_MUTABLE_SRGB_BIT;
+	image_info.misc = hdr ? 0 : IMAGE_MISC_MUTABLE_SRGB_BIT;
 	ImageInitialData initial_data = { plane_data };
 	auto input_image = device.create_image(image_info, &initial_data);
 	ASSERT_THAT(input_image);
@@ -816,7 +816,7 @@ static void test_direct_interop_scaling()
 	view.width = input_image->get_width();
 	view.height = input_image->get_height();
 	view.image_format = input_image->get_format();
-	view.view_format = VK_FORMAT_R8G8B8A8_UNORM;
+	view.view_format = hdr ? VK_FORMAT_A2B10G10R10_UNORM_PACK32 : VK_FORMAT_R8G8B8A8_UNORM;
 	view.layer = 0;
 	view.layout = input_image->get_layout(VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL);
 	view.mip_level = 0;
@@ -829,9 +829,9 @@ static void test_direct_interop_scaling()
 	pyrowave_scaled_encode_info scaling = {};
 	scaling.intermediate_plane_format = VK_FORMAT_R16_UNORM;
 	scaling.view = view;
-	scaling.input_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-	scaling.output_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-	scaling.ycbcr_chroma_midpoint = 130.0f / 255.0f;
+	scaling.input_color_space = hdr ? VK_COLOR_SPACE_HDR10_ST2084_EXT : VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+	scaling.output_color_space = scaling.input_color_space;
+	scaling.ycbcr_chroma_midpoint = hdr ? 0.5f : 130.0f / 255.0f;
 	scaling.force_linear_filtering = true;
 	VkRect2D crop_rect = { { 2, 1 }, { 64, 64 } };
 	scaling.crop_rect = &crop_rect;
@@ -903,18 +903,18 @@ static void test_direct_interop_scaling()
 		for (int x = 0; x < 64; x++)
 		{
 #if 1
-			auto r = float(mirror(128 + (y + 1) * 3 + (x + 2) * 1)) / 255.0f;
-			auto g = float(mirror(128 + (y + 1) * 5 + (x + 2) * 3)) / 255.0f;
-			auto b = float(mirror(128 + (y + 1) * 7 + (x + 2) * 5)) / 255.0f;
+			auto r = float(mirror(128 + (y + 1) * 3 + (x + 2) * 1)) / (hdr ? 1023.0f / 4.0f : 255.0f);
+			auto g = float(mirror(128 + (y + 1) * 5 + (x + 2) * 3)) / (hdr ? 1023.0f / 4.0f : 255.0f);
+			auto b = float(mirror(128 + (y + 1) * 7 + (x + 2) * 5)) / (hdr ? 1023.0f / 4.0f : 255.0f);
 #else
-			float r = 128.0f / 255.0f;
-			float g = 128.0f / 255.0f;
-			float b = 128.0f / 255.0f;
+			float r = 128.0f / (hdr ? 1023.0f / 4.0f : 255.0f);
+			float g = 128.0f / (hdr ? 1023.0f / 4.0f : 255.0f);
+			float b = 128.0f / (hdr ? 1023.0f / 4.0f : 255.0f);
 #endif
 
-			auto Y = 0.2126f * r + 0.7152f * g + 0.0722f * b;
-			auto Cb = 130.0f / 255.0f - 0.114572f * r - 0.385428f * g + 0.5f * b;
-			auto Cr = 130.0f / 255.0f + 0.5f * r - 0.454153f * g - 0.0458471f * b;
+			auto Y = hdr ? 0.2627f * r + 0.6780f * g + 0.0593f * b : 0.2126f * r + 0.7152f * g + 0.0722f * b;
+			auto Cb = scaling.ycbcr_chroma_midpoint + (hdr ? -0.139630f * r - 0.360370f * g : -0.114572f * r - 0.385428f * g) + 0.5f * b;
+			auto Cr = scaling.ycbcr_chroma_midpoint + 0.5f * r + (hdr ? -0.459786f * g - 0.040214f * b : -0.454153f * g - 0.0458471f * b);
 
 			float readback_y = float(readback_ptr[0 * 64 * 64 + y * 64 + x]) / float(0xffff);
 			float readback_cb = float(readback_ptr[1 * 64 * 64 + y * 64 + x]) / float(0xffff);
@@ -924,6 +924,7 @@ static void test_direct_interop_scaling()
 			float cb_delta = std::abs(readback_cb - Cb);
 			float cr_delta = std::abs(readback_cr - Cr);
 			ASSERT_THAT(y_delta <= 1.0f / 255.0f);
+			if (cb_delta > 2.0f / 255.0f) fprintf(stderr, "HDR=%d x=%d y=%d RGB=%f,%f,%f expected=%f cb=%f delta=%f\n", hdr, x,y,r,g,b,Cb,readback_cb,cb_delta);
 			ASSERT_THAT(cb_delta <= 2.0f / 255.0f);
 			ASSERT_THAT(cr_delta <= 2.0f / 255.0f);
 		}
@@ -2665,7 +2666,8 @@ int main(int argc, char **argv)
 
 	printf("Running Vulkan <-> Vulkan interop test with direct device share ...\n");
 	test_direct_interop();
-	test_direct_interop_scaling();
+	test_direct_interop_scaling(false);
+	test_direct_interop_scaling(true);
 
 	printf("Running opaque Vulkan <-> Vulkan interop test ...\n");
 	test_opaque_interop(false);

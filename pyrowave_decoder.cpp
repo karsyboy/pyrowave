@@ -7,6 +7,8 @@
 #include "math.hpp"
 #include "pyrowave_common.hpp"
 #include <algorithm>
+#include <cstring>
+#include "pyrowave_packet_validation.hpp"
 
 namespace PyroWave
 {
@@ -45,7 +47,7 @@ struct Decoder::Impl final : public WaveletBuffers
 	                     const uint32_t *active_block_mask, size_t word_count) const;
 	bool has_pristine_bands(int bands, const uint32_t *active_block_mask, size_t word_count) const;
 
-	bool decode_packet(const BitstreamHeader *header);
+	bool decode_packet(const BitstreamHeader *header, const uint8_t *data);
 
 	bool dequant(CommandBuffer &cmd);
 	bool idwt(CommandBuffer &cmd, const ViewBuffers &views);
@@ -126,8 +128,10 @@ void Decoder::Impl::upload_payload(CommandBuffer &cmd)
 		memcpy(cmd.update_buffer(*payload_data, 0, required_size), payload_data_cpu.data(), required_size);
 }
 
-bool Decoder::Impl::decode_packet(const BitstreamHeader *header)
+bool Decoder::Impl::decode_packet(const BitstreamHeader *header, const uint8_t *data)
 {
+	if (!validate_coefficient_packet(data, header->payload_words * 4))
+		return false;
 	auto &offset = dequant_offset_buffer_cpu[header->block_index];
 	if (offset == UINT32_MAX)
 	{
@@ -139,7 +143,6 @@ bool Decoder::Impl::decode_packet(const BitstreamHeader *header)
 		return true;
 	}
 
-	auto *payload_words = reinterpret_cast<const uint32_t *>(header);
 
 	if (sizeof(*header) / sizeof(uint32_t) > header->payload_words)
 	{
@@ -147,10 +150,9 @@ bool Decoder::Impl::decode_packet(const BitstreamHeader *header)
 		return false;
 	}
 
-	payload_data_cpu.insert(
-			payload_data_cpu.end(),
-			payload_words,
-			payload_words + header->payload_words);
+	size_t previous_size = payload_data_cpu.size();
+	payload_data_cpu.resize(previous_size + header->payload_words);
+	memcpy(payload_data_cpu.data() + previous_size, data, header->payload_words * 4);
 	return true;
 }
 
@@ -159,11 +161,15 @@ bool Decoder::Impl::push_packet(const void *data_, size_t size)
 	auto *data = static_cast<const uint8_t *>(data_);
 	while (size >= sizeof(BitstreamHeader))
 	{
-		auto *header = reinterpret_cast<const BitstreamHeader *>(data);
+		BitstreamHeader aligned_header;
+		memcpy(&aligned_header, data, sizeof(aligned_header));
+		auto *header = &aligned_header;
 
 		if (header->extended != 0)
 		{
-			auto *seq = reinterpret_cast<const BitstreamSequenceHeader *>(header);
+			BitstreamSequenceHeader aligned_seq;
+			memcpy(&aligned_seq, data, sizeof(aligned_seq));
+			auto *seq = &aligned_seq;
 
 			if (sizeof(*header) > size)
 			{
@@ -198,6 +204,8 @@ bool Decoder::Impl::push_packet(const void *data_, size_t size)
 					return false;
 				}
 
+				if (seq->total_blocks > unsigned(block_count_32x32))
+					return false;
 				total_blocks_in_sequence = int(seq->total_blocks);
 			}
 			else
@@ -248,7 +256,8 @@ bool Decoder::Impl::push_packet(const void *data_, size_t size)
 			return false;
 		}
 
-		if (!decode_packet(header))
+		// decode_packet copies the full packet and never dereferences an unaligned word.
+		if (!decode_packet(header, data))
 			return false;
 
 		data += packet_size;

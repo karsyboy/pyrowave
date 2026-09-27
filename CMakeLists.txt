@@ -141,7 +141,7 @@ if (${PROJECT_IS_TOP_LEVEL})
     target_compile_options(pyrowave-device-validation PRIVATE ${PYROWAVE_CXX_FLAGS})
 
     set(PYROWAVE_API_VERSION_MAJOR 0)
-    set(PYROWAVE_API_VERSION_MINOR 6)
+    set(PYROWAVE_API_VERSION_MINOR 7)
     set(PYROWAVE_API_VERSION_PATCH 0)
     set(PYROWAVE_API_VERSION ${PYROWAVE_API_VERSION_MAJOR}.${PYROWAVE_API_VERSION_MINOR}.${PYROWAVE_API_VERSION_PATCH})
 
@@ -214,3 +214,8 @@ if (PYROWAVE_DEVEL AND WIN32)
     target_link_libraries(pyrowave-encode-desktop PRIVATE pyrowave-shared dxgi d3d11 pyrowave-utils)
 endif()
 
+if(PROJECT_IS_TOP_LEVEL)
+    enable_testing()
+    add_executable(pyrowave-packet-validation-test pyrowave_packet_validation_test.cpp)
+    add_test(NAME packet-validation COMMAND pyrowave-packet-validation-test)
+endif()
