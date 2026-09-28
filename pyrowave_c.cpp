@@ -8,6 +8,7 @@
 #include "pyrowave.h"
 #include "pyrowave_decoder.hpp"
 #include "pyrowave_encoder.hpp"
+#include "pyrowave_bitstream.hpp"
 #include "logging.hpp"
 #include "slangmosh_scaler.hpp"
 #include "scaler.hpp"
@@ -876,6 +877,7 @@ struct pyrowave_encoder_opaque
 	Device *device = nullptr;
 	pyrowave_device pyro_device = nullptr;
 	Encoder encoder;
+	pyrowave_color_metadata color = {};
 	Fence queued_fence;
 	BufferHandle queued_meta;
 	BufferHandle queued_bitstream;
@@ -1225,6 +1227,8 @@ pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
 	VideoScaler::RescaleInfo info = {};
 	info.input_color_space = scaling_info->input_color_space;
 	info.output_color_space = scaling_info->output_color_space;
+	const uint32_t hdr = info.output_color_space == VK_COLOR_SPACE_HDR10_ST2084_EXT ? 1u : 0u;
+	encoder->color = { hdr, hdr, hdr, 0, 0 };
 	info.crop_rect = scaling_info->crop_rect;
 	info.skip_dither = scaling_info->skip_dither;
 	info.force_linear_filtering = scaling_info->force_linear_filtering;
@@ -1456,11 +1460,23 @@ pyrowave_encoder_compute_num_critical_packets(
 }
 
 pyrowave_result
+pyrowave_encoder_set_color_metadata(pyrowave_encoder encoder, const pyrowave_color_metadata *metadata)
+{
+	if (!encoder || !metadata || metadata->color_primaries > 1 || metadata->transfer_function > 1 ||
+	    metadata->ycbcr_transform > 1 || metadata->ycbcr_range > 1 || metadata->chroma_siting > 1)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+	encoder->color = *metadata;
+	return PYROWAVE_SUCCESS;
+}
+
+pyrowave_result
 pyrowave_encoder_packetize_with_padding(
 		pyrowave_encoder encoder, pyrowave_packet *packets, size_t packet_boundary, size_t padding_size,
 		size_t *out_packets, void *bitstream, size_t size)
 {
 	Util::set_thread_logging_interface(&null_logger);
+	if (!encoder || !packets || !out_packets || !bitstream || packet_boundary < 8 || padding_size >= packet_boundary)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 	if (encoder->queued_fence)
 		encoder->queued_fence->wait();
 
@@ -1469,10 +1485,33 @@ pyrowave_encoder_packetize_with_padding(
 
 	auto *mapped_meta = encoder->device->map_host_buffer(*encoder->queued_meta, MEMORY_ACCESS_READ_BIT);
 	auto *mapped_bitstream = encoder->device->map_host_buffer(*encoder->queued_bitstream, MEMORY_ACCESS_READ_BIT);
+	size_t required = sizeof(BitstreamSequenceHeader);
+	auto *meta = static_cast<const BitstreamPacket *>(mapped_meta);
+	const size_t blocks = encoder->encoder.get_meta_required_size() / sizeof(BitstreamPacket);
+	for (size_t i = 0; i < blocks; i++)
+	{
+		const size_t block_size = size_t(meta[i].num_words) * 4;
+		if (block_size > size || required > size - block_size)
+			return PYROWAVE_ERROR_INVALID_ARGUMENT;
+		required += block_size;
+	}
+	if (required > size)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
 	*out_packets = encoder->encoder.packetize(
 		reinterpret_cast<Encoder::Packet *>(packets), packet_boundary, bitstream,
 		size, mapped_meta, mapped_bitstream, padding_size);
+	if (*out_packets && size >= sizeof(BitstreamSequenceHeader))
+	{
+		BitstreamSequenceHeader header;
+		memcpy(&header, bitstream, sizeof(header));
+		header.color_primaries = encoder->color.color_primaries;
+		header.transfer_function = encoder->color.transfer_function;
+		header.ycbcr_transform = encoder->color.ycbcr_transform;
+		header.ycbcr_range = encoder->color.ycbcr_range;
+		header.chroma_siting = encoder->color.chroma_siting;
+		memcpy(bitstream, &header, sizeof(header));
+	}
 
 	return PYROWAVE_SUCCESS;
 }

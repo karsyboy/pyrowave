@@ -19,7 +19,7 @@ extern "C" {
 // API and ABI is not considered stable until MAJOR version hits 1!
 
 #define PYROWAVE_API_VERSION_MAJOR 0
-#define PYROWAVE_API_VERSION_MINOR 6
+#define PYROWAVE_API_VERSION_MINOR 7
 #define PYROWAVE_API_VERSION_PATCH 0
 
 #if !defined(PYROWAVE_PUBLIC_API)
@@ -459,6 +459,21 @@ typedef struct pyrowave_rate_control
 	// Very basic, target bitstream for an image must not exceed this size.
 	size_t maximum_bitstream_size;
 } pyrowave_rate_control;
+
+// Bitstream color metadata; values follow bitstream/bitstream.md (each is 0 or 1).
+// No bit-depth profile: decoded samples are floating point.
+typedef struct pyrowave_color_metadata
+{
+	uint32_t color_primaries; // 0: BT.709, 1: BT.2020
+	uint32_t transfer_function; // 0: BT.709, 1: PQ
+	uint32_t ycbcr_transform; // 0: BT.709, 1: BT.2020 NCL
+	uint32_t ycbcr_range; // 0: full, 1: limited
+	uint32_t chroma_siting; // 0: center, 1: left
+} pyrowave_color_metadata;
+
+// Set metadata for raw planar input. The scaled encode path sets it automatically.
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_encoder_set_color_metadata(pyrowave_encoder encoder, const pyrowave_color_metadata *metadata);
 
 // The entry points for encoder are not thread safe. Application must ensure synchronization.
 PYROWAVE_PUBLIC_API pyrowave_result

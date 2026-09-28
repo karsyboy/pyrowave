@@ -36,6 +36,7 @@ EXPORTS
 	pyrowave_encoder_get_num_active_blocks
 	pyrowave_encoder_compute_block_active_words
 	pyrowave_encoder_destroy
+	pyrowave_encoder_set_color_metadata
 	pyrowave_decoder_device_prefers_fragment_path
 	pyrowave_decoder_create
 	pyrowave_decoder_clear
@@ -45,4 +46,3 @@ EXPORTS
 	pyrowave_decoder_decode_gpu_buffer
 	pyrowave_decoder_decode_cpu_buffer_synchronous
 	pyrowave_decoder_destroy
-
