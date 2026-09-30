@@ -24,3 +24,12 @@ update() {
 cd Granite
 update third_party/volk
 update third_party/khronos/vulkan-headers
+
+# Keep the pinned scaler correct for HDR-to-SDR conversion.
+cd ..
+patch_file="$PWD/patches/granite-sdr-normalization.patch"
+if git apply --check "$patch_file"; then
+	git apply "$patch_file"
+else
+	git apply --reverse --check "$patch_file" || exit 1
+fi
