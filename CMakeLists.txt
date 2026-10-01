@@ -229,3 +229,12 @@ if(PROJECT_IS_TOP_LEVEL)
         add_test(NAME color-pipeline COMMAND pyrowave-color-pipeline-test)
     endif()
 endif()
+
+# Linux-only optional cross-revision GPU fixture runner. Shared C API symbols
+# are resolved independently; each codec retains its own native handles.
+option(PYROWAVE_CROSS_CODEC_TESTS "Build the independent Linux cross-codec GPU fixture harness" OFF)
+if(PYROWAVE_CROSS_CODEC_TESTS AND UNIX AND NOT APPLE AND PROJECT_IS_TOP_LEVEL)
+    add_executable(pyrowave-cross-codec-test pyrowave_cross_codec_test.cpp)
+    target_link_libraries(pyrowave-cross-codec-test PRIVATE pyrowave-shared granite-vulkan granite-math dl)
+    target_compile_options(pyrowave-cross-codec-test PRIVATE ${PYROWAVE_CXX_FLAGS})
+endif()
