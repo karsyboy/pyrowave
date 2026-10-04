@@ -57,3 +57,20 @@ The test also bounds the overlay variant against the plain scaler shader
 rejects scaled input and unsupported overlay formats before submitting work.
 Payload placement uses atomics, so compressed bytes are not compared directly.
 The bitstream format is unchanged; only encoder input differs.
+
+# Encoder stage benchmark
+
+`pyrowave-stage-bench frames.rgba W H [444|420] [sdr|hdr] [iterations] [budget]`
+encodes raw RGBA8 frames through the C API scaled path, prints per-stage GPU
+timestamps, then decodes each frame and prints an FNV-1a hash of the decoded
+R16 planes. Shader changes meant to be exact must leave every hash unchanged.
+It runs the encoder on the compute queue by default so a hang from an
+experimental shader resets only a compute ring
+(`PYROWAVE_STAGE_BENCH_GRAPHICS=1` selects graphics);
+`PYROWAVE_STAGE_BENCH_NO_DECODE=1` times without decoding.
+
+On an RX 9070 XT with 4K natural-image frames at a 416 KB budget, quantization
+measured 0.186 ms for 4:4:4 SDR and behaved as bandwidth-bound: aggregating its
+payload atomics per subgroup, merging its clustered integer reductions and
+replacing its float reconstruction with exact integer shifts each left output
+and timing unchanged.

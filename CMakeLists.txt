@@ -221,6 +221,10 @@ if(PROJECT_IS_TOP_LEVEL)
 endif()
 
 if(PROJECT_IS_TOP_LEVEL)
+    add_executable(pyrowave-stage-bench pyrowave_stage_bench.cpp)
+    target_link_libraries(pyrowave-stage-bench PRIVATE pyrowave-shared granite-vulkan granite-math)
+    target_compile_options(pyrowave-stage-bench PRIVATE ${PYROWAVE_CXX_FLAGS})
+
     add_executable(pyrowave-overlay-test pyrowave_overlay_test.cpp)
     target_link_libraries(pyrowave-overlay-test PRIVATE pyrowave-shared granite-vulkan granite-math)
     target_compile_options(pyrowave-overlay-test PRIVATE ${PYROWAVE_CXX_FLAGS})
