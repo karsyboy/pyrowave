@@ -43,3 +43,17 @@ integration and does not change the codec or native wire-v1 framing.
 
 No live client/server stream, physical HDR display, NIC loss, or reconnect is
 established by these fixtures. Those require the deployment validation matrix.
+
+# Overlay (late composition) evidence
+
+`pyrowave-overlay-test` (registered with `-DPYROWAVE_GPU_TESTS=ON`) checks
+`pyrowave_encoder_encode_gpu_scaled_overlay_synchronous` for SDR/R8 and
+PQ2020/R16, 4:2:0/4:4:4 and RGBA/BGRA overlays partly outside the input.
+A binary-alpha overlay must decode sample-for-sample like the same input
+composited on the CPU beforehand, encoded with the same (inert-overlay) scaler
+variant; fractional alpha may differ only by the reference's 8-bit rounding.
+The test also bounds the overlay variant against the plain scaler shader
+(drivers may make different relaxed-precision choices per specialization) and
+rejects scaled input and unsupported overlay formats before submitting work.
+Payload placement uses atomics, so compressed bytes are not compared directly.
+The bitstream format is unchanged; only encoder input differs.

@@ -888,6 +888,11 @@ struct pyrowave_encoder_opaque
 	// For scaling path.
 	ImageHandle scaler_planes[3];
 	VideoScaler scaler;
+
+	// Last uploaded overlay; generations are caller-defined.
+	ImageHandle overlay_image;
+	uint64_t overlay_generation = 0;
+	VkFormat overlay_format = VK_FORMAT_UNDEFINED;
 };
 
 pyrowave_result
@@ -1118,11 +1123,14 @@ pyrowave_encoder_encode_gpu_synchronous_inner(pyrowave_encoder encoder,
 	// Performance issue since these memory types are mapped coherent on the GPU.
 	// A staging copy is just better. Could avoid it on iGPU, but iGPU isn't really supposed to be
 	// used as the encoder when streaming.
+	auto start_readback = cmd->write_timestamp(VK_PIPELINE_STAGE_2_COPY_BIT);
 	cmd->copy_buffer(*encoder->queued_meta, *queued_meta_gpu);
 	cmd->copy_buffer(*encoder->queued_bitstream, *queued_bitstream_gpu);
 
 	cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 				 VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+	auto end_readback = cmd->write_timestamp(VK_PIPELINE_STAGE_2_COPY_BIT);
+	device->register_time_interval("GPU", std::move(start_readback), std::move(end_readback), "Readback");
 
 	encoder->queued_fence.reset();
 
@@ -1158,12 +1166,13 @@ pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
 	return pyrowave_encoder_encode_gpu_synchronous_inner(encoder, acquire, release, views, rate_control);
 }
 
-pyrowave_result
-pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
-											   const pyrowave_gpu_sync_operation *acquire,
-											   const pyrowave_gpu_sync_operation *release,
-											   const pyrowave_scaled_encode_info *scaling_info,
-											   const pyrowave_rate_control *rate_control)
+static pyrowave_result
+pyrowave_encoder_encode_gpu_scaled_inner(pyrowave_encoder encoder,
+                                         const pyrowave_gpu_sync_operation *acquire,
+                                         const pyrowave_gpu_sync_operation *release,
+                                         const pyrowave_scaled_encode_info *scaling_info,
+                                         const pyrowave_overlay *overlay,
+                                         const pyrowave_rate_control *rate_control)
 {
 	Util::set_thread_logging_interface(&null_logger);
 
@@ -1172,6 +1181,43 @@ pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
 	auto *device = encoder->device;
+
+	if (overlay)
+	{
+		// Only the unscaled single-plane path samples input texels 1:1, which
+		// is what makes the blend equal to compositing before encoding.
+		// Granite stages the upload itself, which an external command buffer
+		// would not wait for.
+		bool full_input = !scaling_info->crop_rect ||
+		                  (scaling_info->crop_rect->offset.x == 0 && scaling_info->crop_rect->offset.y == 0 &&
+		                   int(scaling_info->crop_rect->extent.width) == encoder->width &&
+		                   int(scaling_info->crop_rect->extent.height) == encoder->height);
+		if (encoder->pyro_device->cmd || !overlay->pixels || !overlay->width || !overlay->height ||
+		    overlay->stride < overlay->width * 4 ||
+		    (overlay->format != VK_FORMAT_R8G8B8A8_UNORM && overlay->format != VK_FORMAT_B8G8R8A8_UNORM) ||
+		    format_ycbcr_num_planes(scaling_info->view.view_format) != 1 ||
+		    int(scaling_info->view.width) != encoder->width || int(scaling_info->view.height) != encoder->height ||
+		    !full_input || scaling_info->force_linear_filtering)
+		{
+			return PYROWAVE_ERROR_INVALID_ARGUMENT;
+		}
+
+		if (!encoder->overlay_image || encoder->overlay_generation != overlay->generation ||
+		    encoder->overlay_format != overlay->format ||
+		    encoder->overlay_image->get_width() != overlay->width ||
+		    encoder->overlay_image->get_height() != overlay->height)
+		{
+			auto info = ImageCreateInfo::immutable_2d_image(overlay->width, overlay->height, overlay->format);
+			ImageInitialData initial = {};
+			initial.data = overlay->pixels;
+			initial.row_length = overlay->stride / 4;
+			encoder->overlay_image = device->create_image(info, &initial);
+			if (!encoder->overlay_image)
+				return PYROWAVE_ERROR_OUT_OF_DEVICE_MEMORY;
+			encoder->overlay_generation = overlay->generation;
+			encoder->overlay_format = overlay->format;
+		}
+	}
 	device->next_frame_context();
 
 	if (!encoder->scaler_planes[0])
@@ -1232,6 +1278,11 @@ pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
 	info.crop_rect = scaling_info->crop_rect;
 	info.skip_dither = scaling_info->skip_dither;
 	info.force_linear_filtering = scaling_info->force_linear_filtering;
+	if (overlay)
+	{
+		info.overlay = &encoder->overlay_image->get_view();
+		info.overlay_offset = { overlay->x, overlay->y };
+	}
 	encoder->scaler.set_ycbcr_chroma_midpoint(scaling_info->ycbcr_chroma_midpoint);
 
 	if (scaling_info->view.view_format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM)
@@ -1329,6 +1380,27 @@ pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
 	for (int i = 0; i < 3; i++)
 		buffers.planes[i] = &encoder->scaler_planes[i]->get_view();
 	return pyrowave_encoder_encode_gpu_synchronous_inner(encoder, nullptr, release, buffers, rate_control);
+}
+
+pyrowave_result
+pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
+											   const pyrowave_gpu_sync_operation *acquire,
+											   const pyrowave_gpu_sync_operation *release,
+											   const pyrowave_scaled_encode_info *scaling_info,
+											   const pyrowave_rate_control *rate_control)
+{
+	return pyrowave_encoder_encode_gpu_scaled_inner(encoder, acquire, release, scaling_info, nullptr, rate_control);
+}
+
+pyrowave_result
+pyrowave_encoder_encode_gpu_scaled_overlay_synchronous(pyrowave_encoder encoder,
+                                                       const pyrowave_gpu_sync_operation *acquire,
+                                                       const pyrowave_gpu_sync_operation *release,
+                                                       const pyrowave_scaled_encode_info *scaling_info,
+                                                       const pyrowave_overlay *overlay,
+                                                       const pyrowave_rate_control *rate_control)
+{
+	return pyrowave_encoder_encode_gpu_scaled_inner(encoder, acquire, release, scaling_info, overlay, rate_control);
 }
 
 pyrowave_result

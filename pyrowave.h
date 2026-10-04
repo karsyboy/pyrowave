@@ -19,7 +19,7 @@ extern "C" {
 // API and ABI is not considered stable until MAJOR version hits 1!
 
 #define PYROWAVE_API_VERSION_MAJOR 0
-#define PYROWAVE_API_VERSION_MINOR 7
+#define PYROWAVE_API_VERSION_MINOR 8
 #define PYROWAVE_API_VERSION_PATCH 0
 
 #if !defined(PYROWAVE_PUBLIC_API)
@@ -550,6 +550,39 @@ pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
                                                const pyrowave_gpu_sync_operation *release,
                                                const pyrowave_scaled_encode_info *scaling_info,
                                                const pyrowave_rate_control *rate_control);
+
+// An image composited over the input before color conversion, e.g. a cursor
+// a compositor would otherwise draw by rendering the whole scene again.
+// Texels are premultiplied-alpha 8-bit RGBA (VK_FORMAT_R8G8B8A8_UNORM) or
+// BGRA (VK_FORMAT_B8G8R8A8_UNORM) and are blended source-over 1:1 in the
+// input's own encoding, before any transfer function or primary conversion.
+typedef struct pyrowave_overlay
+{
+	const void *pixels;
+	uint32_t width;
+	uint32_t height;
+	// Bytes between rows; at least width * 4.
+	uint32_t stride;
+	VkFormat format;
+	// Top-left corner in input texels; may be partially outside the input.
+	int32_t x;
+	int32_t y;
+	// Pixels are uploaded only when this differs from the previous call's.
+	uint64_t generation;
+} pyrowave_overlay;
+
+// Added in API 0.8. Same as pyrowave_encoder_encode_gpu_scaled_synchronous,
+// additionally compositing `overlay` when non-NULL. Overlays require a
+// single-plane RGB input at the encoder's resolution without cropping, and no
+// command buffer set on pyrowave_device; otherwise INVALID_ARGUMENT is
+// returned before anything is submitted.
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_encoder_encode_gpu_scaled_overlay_synchronous(pyrowave_encoder encoder,
+                                                       const pyrowave_gpu_sync_operation *acquire,
+                                                       const pyrowave_gpu_sync_operation *release,
+                                                       const pyrowave_scaled_encode_info *scaling_info,
+                                                       const pyrowave_overlay *overlay,
+                                                       const pyrowave_rate_control *rate_control);
 
 // A command buffer must not be set on pyrowave_device.
 PYROWAVE_PUBLIC_API pyrowave_result

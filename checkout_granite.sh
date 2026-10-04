@@ -25,11 +25,15 @@ cd Granite
 update third_party/volk
 update third_party/khronos/vulkan-headers
 
-# Keep the pinned scaler correct for HDR-to-SDR conversion.
+# Maintained Granite changes, applied in order (later patches build on
+# earlier ones): HDR-to-SDR normalization, then 1:1 scaler overlays.
+# shaders/slangmosh_scaler.hpp is generated from the patched scaler.
 cd ..
-patch_file="$PWD/patches/granite-sdr-normalization.patch"
-if git apply --check "$patch_file"; then
-	git apply "$patch_file"
-else
-	git apply --reverse --check "$patch_file" || exit 1
-fi
+for name in granite-sdr-normalization.patch granite-scaler-overlay.patch; do
+	patch_file="$PWD/patches/$name"
+	if git apply --check "$patch_file"; then
+		git apply "$patch_file"
+	else
+		git apply --reverse --check "$patch_file" || exit 1
+	fi
+done
