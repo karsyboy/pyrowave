@@ -889,10 +889,14 @@ struct pyrowave_encoder_opaque
 	ImageHandle scaler_planes[3];
 	VideoScaler scaler;
 
-	// Last uploaded overlay; generations are caller-defined.
-	ImageHandle overlay_image;
-	uint64_t overlay_generation = 0;
-	VkFormat overlay_format = VK_FORMAT_UNDEFINED;
+	// Last uploaded CPU texels per layer slot; generations are caller-defined.
+	struct OverlaySlot
+	{
+		ImageHandle image;
+		uint64_t generation = 0;
+		VkFormat format = VK_FORMAT_UNDEFINED;
+	};
+	OverlaySlot overlay_slots[PYROWAVE_MAX_OVERLAY_LAYERS];
 };
 
 pyrowave_result
@@ -1171,7 +1175,8 @@ pyrowave_encoder_encode_gpu_scaled_inner(pyrowave_encoder encoder,
                                          const pyrowave_gpu_sync_operation *acquire,
                                          const pyrowave_gpu_sync_operation *release,
                                          const pyrowave_scaled_encode_info *scaling_info,
-                                         const pyrowave_overlay *overlay,
+                                         const pyrowave_overlay_layer *layers,
+                                         uint32_t layer_count,
                                          const pyrowave_rate_control *rate_control)
 {
 	Util::set_thread_logging_interface(&null_logger);
@@ -1182,19 +1187,23 @@ pyrowave_encoder_encode_gpu_scaled_inner(pyrowave_encoder encoder,
 
 	auto *device = encoder->device;
 
-	if (overlay)
+	// Views sampled by the scaler for each layer slot; wrapped imported views
+	// are kept alive by these handles until the command buffer retires.
+	const ImageView *layer_views[PYROWAVE_MAX_OVERLAY_LAYERS] = {};
+	ImageHandle wrapped_layer_images[PYROWAVE_MAX_OVERLAY_LAYERS];
+	ImageViewHandle wrapped_layer_views[PYROWAVE_MAX_OVERLAY_LAYERS];
+
+	if (layer_count)
 	{
 		// Only the unscaled single-plane path samples input texels 1:1, which
 		// is what makes the blend equal to compositing before encoding.
-		// Granite stages the upload itself, which an external command buffer
+		// Granite stages uploads itself, which an external command buffer
 		// would not wait for.
 		bool full_input = !scaling_info->crop_rect ||
 		                  (scaling_info->crop_rect->offset.x == 0 && scaling_info->crop_rect->offset.y == 0 &&
 		                   int(scaling_info->crop_rect->extent.width) == encoder->width &&
 		                   int(scaling_info->crop_rect->extent.height) == encoder->height);
-		if (encoder->pyro_device->cmd || !overlay->pixels || !overlay->width || !overlay->height ||
-		    overlay->stride < overlay->width * 4 ||
-		    (overlay->format != VK_FORMAT_R8G8B8A8_UNORM && overlay->format != VK_FORMAT_B8G8R8A8_UNORM) ||
+		if (!layers || layer_count > PYROWAVE_MAX_OVERLAY_LAYERS || encoder->pyro_device->cmd ||
 		    format_ycbcr_num_planes(scaling_info->view.view_format) != 1 ||
 		    int(scaling_info->view.width) != encoder->width || int(scaling_info->view.height) != encoder->height ||
 		    !full_input || scaling_info->force_linear_filtering)
@@ -1202,20 +1211,54 @@ pyrowave_encoder_encode_gpu_scaled_inner(pyrowave_encoder encoder,
 			return PYROWAVE_ERROR_INVALID_ARGUMENT;
 		}
 
-		if (!encoder->overlay_image || encoder->overlay_generation != overlay->generation ||
-		    encoder->overlay_format != overlay->format ||
-		    encoder->overlay_image->get_width() != overlay->width ||
-		    encoder->overlay_image->get_height() != overlay->height)
+		auto rgba8 = [](VkFormat format) {
+			return format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_B8G8R8A8_UNORM;
+		};
+		for (uint32_t i = 0; i < layer_count; i++)
 		{
-			auto info = ImageCreateInfo::immutable_2d_image(overlay->width, overlay->height, overlay->format);
-			ImageInitialData initial = {};
-			initial.data = overlay->pixels;
-			initial.row_length = overlay->stride / 4;
-			encoder->overlay_image = device->create_image(info, &initial);
-			if (!encoder->overlay_image)
-				return PYROWAVE_ERROR_OUT_OF_DEVICE_MEMORY;
-			encoder->overlay_generation = overlay->generation;
-			encoder->overlay_format = overlay->format;
+			auto &layer = layers[i];
+			if (!(layer.opacity >= 0.0f && layer.opacity <= 1.0f))
+				return PYROWAVE_ERROR_INVALID_ARGUMENT;
+			if (layer.pixels)
+			{
+				auto *pixels = layer.pixels;
+				if (!pixels->pixels || !pixels->width || !pixels->height ||
+				    pixels->stride < pixels->width * 4 || !rgba8(pixels->format))
+					return PYROWAVE_ERROR_INVALID_ARGUMENT;
+			}
+			else if (!layer.view.image || !rgba8(layer.view.view_format) || !layer.view.width || !layer.view.height)
+				return PYROWAVE_ERROR_INVALID_ARGUMENT;
+		}
+
+		for (uint32_t i = 0; i < layer_count; i++)
+		{
+			auto &layer = layers[i];
+			if (layer.pixels)
+			{
+				auto *pixels = layer.pixels;
+				auto &slot = encoder->overlay_slots[i];
+				if (!slot.image || slot.generation != pixels->generation || slot.format != pixels->format ||
+				    slot.image->get_width() != pixels->width || slot.image->get_height() != pixels->height)
+				{
+					auto info = ImageCreateInfo::immutable_2d_image(pixels->width, pixels->height, pixels->format);
+					ImageInitialData initial = {};
+					initial.data = pixels->pixels;
+					initial.row_length = pixels->stride / 4;
+					slot.image = device->create_image(info, &initial);
+					if (!slot.image)
+						return PYROWAVE_ERROR_OUT_OF_DEVICE_MEMORY;
+					slot.generation = pixels->generation;
+					slot.format = pixels->format;
+				}
+				layer_views[i] = &slot.image->get_view();
+			}
+			else
+			{
+				if (!wrap_view(device, layer.view, wrapped_layer_images[i], wrapped_layer_views[i],
+				               VK_IMAGE_USAGE_SAMPLED_BIT))
+					return PYROWAVE_ERROR_OUT_OF_HOST_MEMORY;
+				layer_views[i] = wrapped_layer_views[i].get();
+			}
 		}
 	}
 	device->next_frame_context();
@@ -1278,10 +1321,12 @@ pyrowave_encoder_encode_gpu_scaled_inner(pyrowave_encoder encoder,
 	info.crop_rect = scaling_info->crop_rect;
 	info.skip_dither = scaling_info->skip_dither;
 	info.force_linear_filtering = scaling_info->force_linear_filtering;
-	if (overlay)
+	for (uint32_t i = 0; i < layer_count; i++)
 	{
-		info.overlay = &encoder->overlay_image->get_view();
-		info.overlay_offset = { overlay->x, overlay->y };
+		info.overlays[i].view = layer_views[i];
+		info.overlays[i].offset = { layers[i].x, layers[i].y };
+		info.overlays[i].opacity = layers[i].opacity;
+		info.overlays[i].opaque = layers[i].opaque;
 	}
 	encoder->scaler.set_ycbcr_chroma_midpoint(scaling_info->ycbcr_chroma_midpoint);
 
@@ -1389,7 +1434,7 @@ pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
 											   const pyrowave_scaled_encode_info *scaling_info,
 											   const pyrowave_rate_control *rate_control)
 {
-	return pyrowave_encoder_encode_gpu_scaled_inner(encoder, acquire, release, scaling_info, nullptr, rate_control);
+	return pyrowave_encoder_encode_gpu_scaled_inner(encoder, acquire, release, scaling_info, nullptr, 0, rate_control);
 }
 
 pyrowave_result
@@ -1400,7 +1445,27 @@ pyrowave_encoder_encode_gpu_scaled_overlay_synchronous(pyrowave_encoder encoder,
                                                        const pyrowave_overlay *overlay,
                                                        const pyrowave_rate_control *rate_control)
 {
-	return pyrowave_encoder_encode_gpu_scaled_inner(encoder, acquire, release, scaling_info, overlay, rate_control);
+	if (!overlay)
+		return pyrowave_encoder_encode_gpu_scaled_inner(encoder, acquire, release, scaling_info, nullptr, 0, rate_control);
+	pyrowave_overlay_layer layer = {};
+	layer.pixels = overlay;
+	layer.x = overlay->x;
+	layer.y = overlay->y;
+	layer.opacity = 1.0f;
+	return pyrowave_encoder_encode_gpu_scaled_inner(encoder, acquire, release, scaling_info, &layer, 1, rate_control);
+}
+
+pyrowave_result
+pyrowave_encoder_encode_gpu_scaled_layers_synchronous(pyrowave_encoder encoder,
+                                                      const pyrowave_gpu_sync_operation *acquire,
+                                                      const pyrowave_gpu_sync_operation *release,
+                                                      const pyrowave_scaled_encode_info *scaling_info,
+                                                      const pyrowave_overlay_layer *layers,
+                                                      uint32_t layer_count,
+                                                      const pyrowave_rate_control *rate_control)
+{
+	return pyrowave_encoder_encode_gpu_scaled_inner(encoder, acquire, release, scaling_info, layers, layer_count,
+	                                                rate_control);
 }
 
 pyrowave_result

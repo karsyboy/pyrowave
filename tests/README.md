@@ -52,6 +52,9 @@ PQ2020/R16, 4:2:0/4:4:4 and RGBA/BGRA overlays partly outside the input.
 A binary-alpha overlay must decode sample-for-sample like the same input
 composited on the CPU beforehand, encoded with the same (inert-overlay) scaler
 variant; fractional alpha may differ only by the reference's 8-bit rounding.
+API 0.9 layer lists add two-layer cases: an image-view layer (BGRX, alpha
+ignored) under a CPU-texel cursor must decode identically to the pre-composited
+input at full opacity, and within the 8-bit rounding tolerance at 75% opacity.
 The test also bounds the overlay variant against the plain scaler shader
 (drivers may make different relaxed-precision choices per specialization) and
 rejects scaled input and unsupported overlay formats before submitting work.

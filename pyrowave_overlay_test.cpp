@@ -98,7 +98,8 @@ struct Config
 };
 
 static std::vector<uint8_t> encode(Harness &h, const Config &config, int width, int height,
-                                   const std::vector<uint32_t> &source, const pyrowave_overlay *overlay)
+                                   const std::vector<uint32_t> &source, const pyrowave_overlay *overlay,
+                                   const pyrowave_overlay_layer *layers = nullptr, uint32_t layer_count = 0)
 {
 	pyrowave_encoder encoder = nullptr;
 	pyrowave_encoder_create_info encoder_info = {};
@@ -129,7 +130,9 @@ static std::vector<uint8_t> encode(Harness &h, const Config &config, int width, 
 	// Dithering stays enabled: it depends only on the output position.
 
 	pyrowave_rate_control rate_control = { size_t(width) * height * 16 + 65536 };
-	if (overlay)
+	if (layer_count)
+		CHECKED(pyrowave_encoder_encode_gpu_scaled_layers_synchronous(encoder, nullptr, nullptr, &scaling, layers, layer_count, &rate_control));
+	else if (overlay)
 		CHECKED(pyrowave_encoder_encode_gpu_scaled_overlay_synchronous(encoder, nullptr, nullptr, &scaling, overlay, &rate_control));
 	else
 		CHECKED(pyrowave_encoder_encode_gpu_scaled_synchronous(encoder, nullptr, nullptr, &scaling, &rate_control));
@@ -339,6 +342,108 @@ static void run(Harness &h, const Config &config, bool binary_alpha)
 	}
 }
 
+// A notification-like layer read from an image (BGRX, so its alpha bytes are
+// garbage and must be ignored) at the given opacity, under a binary-alpha
+// cursor from CPU texels. Full opacity must decode exactly like the same input
+// composited beforehand (same scaler variant); 75% opacity within rounding.
+static void run_layers(Harness &h, const Config &config, float opacity)
+{
+	const int width = 256, height = 128;
+	const int nw = 120, nh = 60, nx = 180, ny = 30;
+	const int cw = 37, ch = 29, cx = -6, cy = 99;
+	uint32_t seed = 777;
+	auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+	std::vector<uint32_t> source(size_t(width) * height);
+	for (auto &texel : source)
+		texel = (rnd() & 0xffffffu) | 0xff000000u;
+	std::vector<uint32_t> notification(size_t(nw) * nh); // B, G, R, X bytes
+	for (auto &texel : notification)
+		texel = rnd();
+	std::vector<uint8_t> cursor(size_t(cw) * ch * 4); // RGBA, premultiplied
+	for (int i = 0; i < cw * ch; i++)
+	{
+		unsigned a = (rnd() & 1) ? 255 : 0;
+		for (int c = 0; c < 3; c++)
+			cursor[size_t(i) * 4 + c] = uint8_t(rnd() % (a + 1));
+		cursor[size_t(i) * 4 + 3] = uint8_t(a);
+	}
+
+	auto composited = source;
+	auto blend = [&](int ox, int oy, int ow, int oh, auto texel) {
+		for (int y = 0; y < oh; y++)
+			for (int x = 0; x < ow; x++)
+			{
+				int px = ox + x, py = oy + y;
+				if (px < 0 || py < 0 || px >= width || py >= height)
+					continue;
+				float o[4];
+				texel(x, y, o);
+				auto &d = composited[size_t(py) * width + px];
+				uint32_t out = 0xff000000u;
+				for (int c = 0; c < 3; c++)
+				{
+					float v = o[c] + float((d >> (8 * c)) & 0xff) / 255.0f * (1.0f - o[3]);
+					out |= uint32_t(std::lround(std::min(1.0f, std::max(0.0f, v)) * 255.0f)) << (8 * c);
+				}
+				d = out;
+			}
+	};
+	blend(nx, ny, nw, nh, [&](int x, int y, float *o) {
+		uint32_t t = notification[size_t(y) * nw + x];
+		o[0] = float((t >> 16) & 0xff) / 255.0f * opacity;
+		o[1] = float((t >> 8) & 0xff) / 255.0f * opacity;
+		o[2] = float(t & 0xff) / 255.0f * opacity;
+		o[3] = opacity;
+	});
+	blend(cx, cy, cw, ch, [&](int x, int y, float *o) {
+		const uint8_t *t = &cursor[(size_t(y) * cw + x) * 4];
+		for (int c = 0; c < 4; c++)
+			o[c] = t[c] / 255.0f;
+	});
+
+	auto image_info = ImageCreateInfo::immutable_2d_image(nw, nh, VK_FORMAT_B8G8R8A8_UNORM);
+	image_info.initial_layout = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
+	ImageInitialData initial = { notification.data() };
+	auto notification_image = h.device.create_image(image_info, &initial);
+	ASSERT_THAT(notification_image);
+	h.device.wait_idle();
+
+	pyrowave_overlay cursor_pixels = { cursor.data(), uint32_t(cw), uint32_t(ch), uint32_t(cw * 4),
+	                                   VK_FORMAT_R8G8B8A8_UNORM, 0, 0, 1 };
+	pyrowave_overlay_layer layers[2] = {};
+	layers[0].view.image = notification_image->get_image();
+	layers[0].view.width = nw;
+	layers[0].view.height = nh;
+	layers[0].view.image_format = layers[0].view.view_format = VK_FORMAT_B8G8R8A8_UNORM;
+	layers[0].view.layout = notification_image->get_layout(VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL);
+	layers[0].view.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+	layers[0].x = nx;
+	layers[0].y = ny;
+	layers[0].opacity = opacity;
+	layers[0].opaque = true;
+	layers[1].pixels = &cursor_pixels;
+	layers[1].x = cx;
+	layers[1].y = cy;
+	layers[1].opacity = 1.0f;
+	pyrowave_overlay_layer inert[2] = { layers[0], layers[1] };
+	inert[0].x = inert[1].x = width + 1;
+
+	auto late = encode(h, config, width, height, source, nullptr, layers, 2);
+	auto early = encode(h, config, width, height, composited, nullptr, inert, 2);
+	auto a = decode(h, config, width, height, late);
+	auto b = decode(h, config, width, height, early);
+	unsigned worst = 0;
+	for (size_t i = 0; i < a.size(); i++)
+		worst = std::max(worst, unsigned(std::abs(int(a[i]) - int(b[i]))));
+	printf("%s %s two layers, opacity %.2f: max decoded difference %u/65535\n", config.hdr ? "PQ2020/R16" : "SDR709/R8",
+	       config.c444 ? "444" : "420", opacity, worst);
+	fflush(stdout);
+	if (opacity == 1.0f)
+		ASSERT_THAT(worst == 0);
+	else
+		ASSERT_THAT(worst <= 3u * 257u);
+}
+
 int main()
 {
 	Harness h;
@@ -347,6 +452,11 @@ int main()
 			for (VkFormat format : { VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM })
 				for (bool binary : { true, false })
 					run(h, { hdr, c444, format }, binary);
+
+	for (bool hdr : { false, true })
+		for (bool c444 : { false, true })
+			for (float opacity : { 1.0f, 0.75f })
+				run_layers(h, { hdr, c444, VK_FORMAT_R8G8B8A8_UNORM }, opacity);
 
 	// Unsupported requests fail before submitting anything.
 	pyrowave_encoder encoder = nullptr;

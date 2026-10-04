@@ -19,7 +19,7 @@ extern "C" {
 // API and ABI is not considered stable until MAJOR version hits 1!
 
 #define PYROWAVE_API_VERSION_MAJOR 0
-#define PYROWAVE_API_VERSION_MINOR 8
+#define PYROWAVE_API_VERSION_MINOR 9
 #define PYROWAVE_API_VERSION_PATCH 0
 
 #if !defined(PYROWAVE_PUBLIC_API)
@@ -583,6 +583,36 @@ pyrowave_encoder_encode_gpu_scaled_overlay_synchronous(pyrowave_encoder encoder,
                                                        const pyrowave_scaled_encode_info *scaling_info,
                                                        const pyrowave_overlay *overlay,
                                                        const pyrowave_rate_control *rate_control);
+
+// One composited layer (API 0.9). Texels come from `pixels` when non-NULL
+// (its x/y are ignored), otherwise from `view`, a single-plane 8-bit RGBA/BGRA
+// image on this device in GENERAL layout, e.g. an imported client DMA-BUF.
+// The view must stay valid until the encode's completion fence is waited.
+typedef struct pyrowave_overlay_layer
+{
+	const pyrowave_overlay *pixels;
+	pyrowave_image_view view;
+	// Top-left corner in input texels; may be partially outside the input.
+	int32_t x;
+	int32_t y;
+	// Element alpha applied to the premultiplied texels (compositor opacity).
+	float opacity;
+	// Treat the texel alpha as one (X formats).
+	bool opaque;
+} pyrowave_overlay_layer;
+
+#define PYROWAVE_MAX_OVERLAY_LAYERS 2
+
+// Added in API 0.9. Like pyrowave_encoder_encode_gpu_scaled_overlay_synchronous
+// with up to PYROWAVE_MAX_OVERLAY_LAYERS layers composited bottom to top.
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_encoder_encode_gpu_scaled_layers_synchronous(pyrowave_encoder encoder,
+                                                      const pyrowave_gpu_sync_operation *acquire,
+                                                      const pyrowave_gpu_sync_operation *release,
+                                                      const pyrowave_scaled_encode_info *scaling_info,
+                                                      const pyrowave_overlay_layer *layers,
+                                                      uint32_t layer_count,
+                                                      const pyrowave_rate_control *rate_control);
 
 // A command buffer must not be set on pyrowave_device.
 PYROWAVE_PUBLIC_API pyrowave_result
