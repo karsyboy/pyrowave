@@ -41,18 +41,24 @@ the native encoder writes HDR color bits. A negotiated record adapter must
 normalize that default from session metadata. This belongs to the transport
 integration and does not change the codec or native wire-v1 framing.
 
+After merging upstream API 1.0 (bitstream v1 freeze, fork API 1.1), the
+default fixture run and the full 288-comparison matrix passed between the merged
+library and the pre-merge fork (`4cff786`, API 0.9) on the same RX 9070 XT /
+RADV GFX1201, Mesa 26.2.4. The harness resolves the scaled encode entry point by
+its 1.0 name and falls back to the pre-1.0 `_synchronous` name.
+
 No live client/server stream, physical HDR display, NIC loss, or reconnect is
 established by these fixtures. Those require the deployment validation matrix.
 
 # Overlay (late composition) evidence
 
 `pyrowave-overlay-test` (registered with `-DPYROWAVE_GPU_TESTS=ON`) checks
-`pyrowave_encoder_encode_gpu_scaled_overlay_synchronous` for SDR/R8 and
+`pyrowave_encoder_encode_gpu_scaled_overlay` for SDR/R8 and
 PQ2020/R16, 4:2:0/4:4:4 and RGBA/BGRA overlays partly outside the input.
 A binary-alpha overlay must decode sample-for-sample like the same input
 composited on the CPU beforehand, encoded with the same (inert-overlay) scaler
 variant; fractional alpha may differ only by the reference's 8-bit rounding.
-API 0.9 layer lists add two-layer cases: an image-view layer (BGRX, alpha
+Layer lists (`pyrowave_encoder_encode_gpu_scaled_layers`) add two-layer cases: an image-view layer (BGRX, alpha
 ignored) under a CPU-texel cursor must decode identically to the pre-composited
 input at full opacity, and within the 8-bit rounding tolerance at 75% opacity.
 The test also bounds the overlay variant against the plain scaler shader

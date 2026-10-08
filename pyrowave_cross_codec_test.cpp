@@ -53,7 +53,12 @@ template<class T> static T symbol(void* lib, const char* name) {
 #define pyrowave_decoder_push_packet(...) symbol<decltype(&::pyrowave_decoder_push_packet)>(decodeLibrary, "pyrowave_decoder_push_packet")(__VA_ARGS__)
 #define pyrowave_encoder_compute_num_packets(...) symbol<decltype(&::pyrowave_encoder_compute_num_packets)>(encodeLibrary, "pyrowave_encoder_compute_num_packets")(__VA_ARGS__)
 #define pyrowave_encoder_create(...) symbol<decltype(&::pyrowave_encoder_create)>(encodeLibrary, "pyrowave_encoder_create")(__VA_ARGS__)
-#define pyrowave_encoder_encode_gpu_scaled_synchronous(...) symbol<decltype(&::pyrowave_encoder_encode_gpu_scaled_synchronous)>(encodeLibrary, "pyrowave_encoder_encode_gpu_scaled_synchronous")(__VA_ARGS__)
+// API 1.0 dropped the _synchronous suffix; pre-1.0 reference libraries still export it.
+static decltype(&::pyrowave_encoder_encode_gpu_scaled) encode_scaled_symbol(void* lib) {
+    auto ptr = reinterpret_cast<decltype(&::pyrowave_encoder_encode_gpu_scaled)>(dlsym(lib, "pyrowave_encoder_encode_gpu_scaled"));
+    return ptr ? ptr : symbol<decltype(&::pyrowave_encoder_encode_gpu_scaled)>(lib, "pyrowave_encoder_encode_gpu_scaled_synchronous");
+}
+#define pyrowave_encoder_encode_gpu_scaled(...) encode_scaled_symbol(encodeLibrary)(__VA_ARGS__)
 #define pyrowave_encoder_packetize(...) symbol<decltype(&::pyrowave_encoder_packetize)>(encodeLibrary, "pyrowave_encoder_packetize")(__VA_ARGS__)
 #define pyrowave_decoder_destroy(...) symbol<decltype(&::pyrowave_decoder_destroy)>(decodeLibrary, "pyrowave_decoder_destroy")(__VA_ARGS__)
 #define pyrowave_encoder_destroy(...) symbol<decltype(&::pyrowave_encoder_destroy)>(encodeLibrary, "pyrowave_encoder_destroy")(__VA_ARGS__)
@@ -204,7 +209,7 @@ static void test_color_pipeline(bool hdr, bool ten, bool c444, int width, int he
 	
 
 	symbol<decltype(&pyrowave_device_set_command_buffer)>(encodeLibrary, "pyrowave_device_set_command_buffer")(pyro_device, cmd->get_command_buffer());
-	CHECKED(pyrowave_encoder_encode_gpu_scaled_synchronous(encoder, nullptr, nullptr, &scaling, &rate_control));
+	CHECKED(pyrowave_encoder_encode_gpu_scaled(encoder, nullptr, nullptr, &scaling, &rate_control));
 	symbol<decltype(&pyrowave_device_set_command_buffer)>(encodeLibrary, "pyrowave_device_set_command_buffer")(pyro_device, VK_NULL_HANDLE);
 
 	// Wait on CPU before we call packetization.

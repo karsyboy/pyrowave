@@ -178,7 +178,7 @@ static void test_color_pipeline(bool hdr, bool ten, bool c444, int width, int he
 	
 
 	pyrowave_device_set_command_buffer(pyro_device, cmd->get_command_buffer());
-	CHECKED(pyrowave_encoder_encode_gpu_scaled_synchronous(encoder, nullptr, nullptr, &scaling, &rate_control));
+	CHECKED(pyrowave_encoder_encode_gpu_scaled(encoder, nullptr, nullptr, &scaling, &rate_control));
 	pyrowave_device_set_command_buffer(pyro_device, VK_NULL_HANDLE);
 
 	// Wait on CPU before we call packetization.

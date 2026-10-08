@@ -161,7 +161,7 @@ int main(int argc, char **argv)
 
 	auto encode_one = [&](const ImageHandle &input) -> size_t {
 		auto scaling = scaling_for(input);
-		CHECKED(pyrowave_encoder_encode_gpu_scaled_synchronous(encoder, nullptr, nullptr, &scaling, &rate_control));
+		CHECKED(pyrowave_encoder_encode_gpu_scaled(encoder, nullptr, nullptr, &scaling, &rate_control));
 		size_t num_packets = 0;
 		CHECKED(pyrowave_encoder_compute_num_packets(encoder, bitstream.size(), &num_packets));
 		// Diagnostic shader variants may produce invalid streams; only time them.

@@ -131,11 +131,11 @@ static std::vector<uint8_t> encode(Harness &h, const Config &config, int width, 
 
 	pyrowave_rate_control rate_control = { size_t(width) * height * 16 + 65536 };
 	if (layer_count)
-		CHECKED(pyrowave_encoder_encode_gpu_scaled_layers_synchronous(encoder, nullptr, nullptr, &scaling, layers, layer_count, &rate_control));
+		CHECKED(pyrowave_encoder_encode_gpu_scaled_layers(encoder, nullptr, nullptr, &scaling, layers, layer_count, &rate_control));
 	else if (overlay)
-		CHECKED(pyrowave_encoder_encode_gpu_scaled_overlay_synchronous(encoder, nullptr, nullptr, &scaling, overlay, &rate_control));
+		CHECKED(pyrowave_encoder_encode_gpu_scaled_overlay(encoder, nullptr, nullptr, &scaling, overlay, &rate_control));
 	else
-		CHECKED(pyrowave_encoder_encode_gpu_scaled_synchronous(encoder, nullptr, nullptr, &scaling, &rate_control));
+		CHECKED(pyrowave_encoder_encode_gpu_scaled(encoder, nullptr, nullptr, &scaling, &rate_control));
 
 	size_t num_packets = 0;
 	CHECKED(pyrowave_encoder_compute_num_packets(encoder, rate_control.maximum_bitstream_size, &num_packets));
@@ -474,12 +474,12 @@ int main()
 	scaling.view.view_format = VK_FORMAT_R8G8B8A8_UNORM;
 	scaling.intermediate_plane_format = VK_FORMAT_R8_UNORM;
 	pyrowave_rate_control rate_control = { 1 << 20 };
-	ASSERT_THAT(pyrowave_encoder_encode_gpu_scaled_overlay_synchronous(encoder, nullptr, nullptr, &scaling, &overlay,
+	ASSERT_THAT(pyrowave_encoder_encode_gpu_scaled_overlay(encoder, nullptr, nullptr, &scaling, &overlay,
 	                                                                  &rate_control) == PYROWAVE_ERROR_INVALID_ARGUMENT);
 	overlay.format = VK_FORMAT_R16G16B16A16_SFLOAT;
 	scaling.view.width = 128;
 	scaling.view.height = 64;
-	ASSERT_THAT(pyrowave_encoder_encode_gpu_scaled_overlay_synchronous(encoder, nullptr, nullptr, &scaling, &overlay,
+	ASSERT_THAT(pyrowave_encoder_encode_gpu_scaled_overlay(encoder, nullptr, nullptr, &scaling, &overlay,
 	                                                                  &rate_control) == PYROWAVE_ERROR_INVALID_ARGUMENT);
 	pyrowave_encoder_destroy(encoder);
 	printf("overlay tests passed\n");

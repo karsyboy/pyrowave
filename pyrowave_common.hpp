@@ -141,4 +141,16 @@ protected:
 private:
 	void accumulate_block_mapping(int blocks_x_8x8, int blocks_y_8x8);
 };
+
+struct PWV1Header
+{
+	enum { Magic = ('P' << 0) | ('W' << 8) | ('V' << 16) | ('1' << 24) };
+	uint32_t magic;
+	BitstreamSequenceHeader pyro;
+	uint32_t frame_rate_num;
+	uint32_t frame_rate_den;
+	uint8_t reference_bit_depth;
+	uint8_t header_version;
+	uint8_t padding[2];
+};
 }
