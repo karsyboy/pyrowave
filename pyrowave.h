@@ -564,6 +564,11 @@ typedef struct pyrowave_scaled_encode_info
 	uint32_t ycbcr_range_bit_depth;
 } pyrowave_scaled_encode_info;
 
+// Fork contract: without a command buffer set on the device, a failed call
+// leaves no GPU read of the input outstanding, so the caller may reuse it,
+// except PYROWAVE_ERROR_GENERIC, which means completion of reads that were
+// already queued could not be established (e.g. device loss).
+// The same holds for the _overlay and _layers variants.
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_encoder_encode_gpu_scaled(pyrowave_encoder encoder,
                                    const pyrowave_gpu_sync_operation *acquire,
@@ -642,6 +647,9 @@ pyrowave_encoder_encode_cpu(pyrowave_encoder encoder, const pyrowave_cpu_buffer 
 
 // Can only be called after a successful encoding operation and result is only valid for that particular frame.
 // Computes the number of network packets required if each packet can consume a provided number of bytes.
+// These, packetize and the other readback calls wait for the frame's GPU work;
+// PYROWAVE_ERROR_GENERIC means that wait failed and the work, including its
+// reads of the input, may still be running.
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_encoder_compute_num_packets(pyrowave_encoder encoder, size_t packet_boundary, size_t *num_packets);
 PYROWAVE_PUBLIC_API pyrowave_result

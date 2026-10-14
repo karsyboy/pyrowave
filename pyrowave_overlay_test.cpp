@@ -482,5 +482,44 @@ int main()
 	ASSERT_THAT(pyrowave_encoder_encode_gpu_scaled_overlay(encoder, nullptr, nullptr, &scaling, &overlay,
 	                                                                  &rate_control) == PYROWAVE_ERROR_INVALID_ARGUMENT);
 	pyrowave_encoder_destroy(encoder);
+
+	// A request rejected after the scaler pass was queued (here: no bitstream
+	// budget) returns only once that pass has read the input, so the caller may
+	// release the input at once. Under the validation layer, a scaler pass left
+	// pending would be reported when the next encode submits it.
+	encoder_info.chroma = PYROWAVE_CHROMA_SUBSAMPLING_420;
+	CHECKED(pyrowave_encoder_create(&encoder_info, &encoder));
+	auto make_input = [&]() {
+		std::vector<uint32_t> texels(size_t(encoder_info.width) * encoder_info.height, 0xff4080c0u);
+		auto info = ImageCreateInfo::immutable_2d_image(encoder_info.width, encoder_info.height, VK_FORMAT_R8G8B8A8_UNORM);
+		info.initial_layout = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
+		ImageInitialData initial = { texels.data() };
+		auto image = h.device.create_image(info, &initial);
+		ASSERT_THAT(image);
+		h.device.wait_idle();
+		scaling.view.image = image->get_image();
+		scaling.view.image_format = VK_FORMAT_R8G8B8A8_UNORM;
+		scaling.view.layout = image->get_layout(VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL);
+		scaling.view.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+		return image;
+	};
+	scaling.input_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+	scaling.output_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+	scaling.ycbcr_chroma_midpoint = 128.0f / 255.0f;
+	auto input = make_input();
+	pyrowave_rate_control no_budget = { 0 };
+	ASSERT_THAT(pyrowave_encoder_encode_gpu_scaled(encoder, nullptr, nullptr, &scaling, &no_budget) ==
+	            PYROWAVE_ERROR_INVALID_ARGUMENT);
+	input.reset();
+	h.device.wait_idle(); // Destroys the input's VkImage.
+	input = make_input();
+	CHECKED(pyrowave_encoder_encode_gpu_scaled(encoder, nullptr, nullptr, &scaling, &rate_control));
+	size_t num_packets = 0;
+	CHECKED(pyrowave_encoder_compute_num_packets(encoder, rate_control.maximum_bitstream_size, &num_packets));
+	ASSERT_THAT(num_packets == 1);
+	// A late read of the destroyed input can lose the device (seen on RADV
+	// under the validation layer), which the encode calls above would report.
+	ASSERT_THAT(h.device.get_device_table().vkDeviceWaitIdle(h.device.get_device()) == VK_SUCCESS);
+	pyrowave_encoder_destroy(encoder);
 	printf("overlay tests passed\n");
 }

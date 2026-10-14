@@ -32,6 +32,18 @@ struct NullLogger : Util::LoggingInterface
 
 static NullLogger null_logger;
 
+// Granite's FenceHolder::wait() returns nothing when the wait fails (device
+// loss, hang report), so ask the fence afterwards whether it really signalled.
+// A false result means the GPU work it covers may still be running: the caller
+// must neither read its results nor release what it reads.
+static bool wait_fence_checked(Fence &fence)
+{
+	if (!fence)
+		return true;
+	fence->wait();
+	return fence->wait_timeout(0);
+}
+
 extern "C" {
 void pyrowave_get_api_version(uint32_t *major, uint32_t *minor, uint32_t *patch)
 {
@@ -1457,7 +1469,21 @@ pyrowave_encoder_encode_gpu_scaled_inner(pyrowave_encoder encoder,
 	for (int i = 0; i < 3; i++)
 		buffers.planes[i] = &encoder->scaler_planes[i]->get_view();
 	buffers.range_scale = encoder->ycbcr_scaling_factor;
-	return pyrowave_encoder_encode_gpu_inner(encoder, nullptr, release, buffers, rate_control);
+	auto ret = pyrowave_encoder_encode_gpu_inner(encoder, nullptr, release, buffers, rate_control);
+
+	// The scaler work above reads the caller's source and is already queued.
+	// On success the encode's fence covers it; on failure nothing does, and the
+	// caller may reuse the source as soon as this returns. Flush the queue and
+	// wait for it, so an error means no source read is outstanding, except
+	// PYROWAVE_ERROR_GENERIC: completion of the queued reads is unknown.
+	if (ret != PYROWAVE_SUCCESS && !encoder->pyro_device->cmd)
+	{
+		Fence drained;
+		device->submit_empty(encoder->pyro_device->queue_type, &drained, nullptr);
+		if (!drained || !wait_fence_checked(drained))
+			return PYROWAVE_ERROR_GENERIC;
+	}
+	return ret;
 }
 
 static bool pyrowave_cpu_buffer_format_subsampled(pyrowave_cpu_buffer_format format)
@@ -1700,8 +1726,8 @@ pyrowave_encoder_compute_num_packets_with_padding(
 	Util::set_thread_logging_interface(&null_logger);
 
 	auto &context = encoder->contexts[encoder->context];
-	if (context.queued_fence)
-		context.queued_fence->wait();
+	if (!wait_fence_checked(context.queued_fence))
+		return PYROWAVE_ERROR_GENERIC;
 
 	if (!context.queued_meta)
 		return PYROWAVE_ERROR_GENERIC;
@@ -1730,8 +1756,8 @@ pyrowave_encoder_compute_num_critical_packets(
 	if (bands < 0 || bands > 4)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
-	if (context.queued_fence)
-		context.queued_fence->wait();
+	if (!wait_fence_checked(context.queued_fence))
+		return PYROWAVE_ERROR_GENERIC;
 
 	if (!context.queued_meta)
 		return PYROWAVE_ERROR_GENERIC;
@@ -1763,8 +1789,8 @@ pyrowave_encoder_packetize_with_padding(
 
 	auto &context = encoder->contexts[encoder->context];
 
-	if (context.queued_fence)
-		context.queued_fence->wait();
+	if (!wait_fence_checked(context.queued_fence))
+		return PYROWAVE_ERROR_GENERIC;
 
 	if (!context.queued_meta || !context.queued_bitstream)
 		return PYROWAVE_ERROR_GENERIC;
@@ -1811,8 +1837,8 @@ pyrowave_encoder_get_mapped_raw_bitstream(
 
 	auto &context = encoder->contexts[encoder->context];
 
-	if (context.queued_fence)
-		context.queued_fence->wait();
+	if (!wait_fence_checked(context.queued_fence))
+		return PYROWAVE_ERROR_GENERIC;
 
 	if (!context.queued_meta || !context.queued_bitstream)
 		return PYROWAVE_ERROR_GENERIC;
@@ -1846,8 +1872,8 @@ pyrowave_encoder_compute_block_active_words(pyrowave_encoder encoder,
 
 	auto &context = encoder->contexts[encoder->context];
 
-	if (context.queued_fence)
-		context.queued_fence->wait();
+	if (!wait_fence_checked(context.queued_fence))
+		return PYROWAVE_ERROR_GENERIC;
 
 	if (!context.queued_meta)
 		return PYROWAVE_ERROR_GENERIC;
@@ -2261,7 +2287,8 @@ pyrowave_decoder_decode_cpu_buffer_complete(pyrowave_decoder decoder, const pyro
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
 	auto *device = decoder->device;
-	context.fence->wait();
+	if (!wait_fence_checked(context.fence))
+		return PYROWAVE_ERROR_GENERIC;
 
 	for (int plane = 0; plane < 3; plane++)
 	{
