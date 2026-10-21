@@ -966,7 +966,12 @@ static void test_opaque_interop(bool win32_kmt)
 	// No impl seems to support OPAQUE_KMT timelines.
 	auto timeline_sem = device.request_semaphore_external(VK_SEMAPHORE_TYPE_TIMELINE, ExternalHandle::get_opaque_semaphore_handle_type());
 
-	ASSERT_THAT(timeline_sem);
+	if (!timeline_sem)
+	{
+		LOGE("Timeline semaphores not supported on this platform.\n");
+		return;
+	}
+
 	pyrowave_sync_object imported_timeline = create_sync_object_from_timeline(pyro_device, *timeline_sem);
 
 	auto exportable_nv12_image = create_exportable_test_image(
@@ -1049,7 +1054,13 @@ static void test_drm_modifier_interop()
 
 	auto timeline_sem = device.request_semaphore_external(VK_SEMAPHORE_TYPE_TIMELINE,
 		ExternalHandle::get_opaque_semaphore_handle_type());
-	ASSERT_THAT(timeline_sem);
+
+	if (!timeline_sem)
+	{
+		LOGE("Timeline semaphores not supported on this platform.\n");
+		return;
+	}
+
 	pyrowave_sync_object imported_timeline = create_sync_object_from_timeline(pyro_device, *timeline_sem);
 
 	auto exportable_nv12_image = create_exportable_test_image(
